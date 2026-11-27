@@ -1,3 +1,4 @@
+
 import { createClient, isSuccessful } from "genlayer-js";
 import { studionet } from "genlayer-js/chains";
 
@@ -19,8 +20,10 @@ function showNotice(message) {
 }
 
 function showAssessment(report) {
-  const parts = report.split("\\n---\\n");
-  const assessment = parts.length > 1 ? parts.slice(1).join("\\n---\\n") : report;
+  const parts = String(report).split(/\r?\n---\r?\n/);
+  const assessment =
+    parts.length > 1 ? parts.slice(1).join("\n---\n") : String(report);
+
   result.textContent = assessment.trim();
   result.hidden = false;
 }
@@ -39,7 +42,9 @@ analyzeButton.addEventListener("click", async () => {
   }
 
   if (!window.ethereum) {
-    showNotice("MetaMask was not detected. Install or unlock MetaMask, then refresh this page.");
+    showNotice(
+      "MetaMask was not detected. Install or unlock MetaMask, then refresh this page."
+    );
     return;
   }
 
@@ -48,7 +53,10 @@ analyzeButton.addEventListener("click", async () => {
   result.hidden = true;
 
   try {
-    const accounts = await window.ethereum.request({ method: "eth_requestAccounts" });
+    const accounts = await window.ethereum.request({
+      method: "eth_requestAccounts",
+    });
+
     const walletAddress = accounts?.[0];
 
     if (!walletAddress) {
@@ -63,7 +71,9 @@ analyzeButton.addEventListener("click", async () => {
 
     await client.connect("studionet");
 
-    showNotice("Preparing your on-chain AI analysis. Confirm the transaction in MetaMask when prompted.");
+    showNotice(
+      "Preparing your on-chain AI analysis. Confirm the transaction in MetaMask when prompted."
+    );
     analyzeButton.textContent = "Preparing transaction...";
 
     const write = {
@@ -82,22 +92,42 @@ analyzeButton.addEventListener("click", async () => {
       },
     });
 
-    showNotice(`Transaction submitted: ${txHash}. Waiting for GenLayer consensus...`);
+    showNotice(
+      `Transaction submitted: ${txHash}. Waiting for GenLayer consensus...`
+    );
     analyzeButton.textContent = "Waiting for consensus...";
 
-    const transaction = await client.waitForFinalization({ hash: txHash });
+    // Wait for the consensus decision instead of waiting indefinitely
+    // for full finalization.
+    const transaction = await client.waitForDecision({
+      hash: txHash,
+      interval: 5000,
+      retries: 100,
+    });
 
     if (!isSuccessful(transaction)) {
       throw new Error(
-        `GenLayer analysis did not succeed: ${transaction.statusName ?? "unknown status"} / ${transaction.txExecutionResultName ?? "unknown result"}`
+        `GenLayer analysis did not succeed: ${
+          transaction.statusName ?? "unknown status"
+        } / ${
+          transaction.txExecutionResultName ?? "unknown result"
+        }`
       );
     }
 
-    const reportId = await client.readContract({
-      address: CONTRACT_ADDRESS,
-      functionName: "get_report_count",
-      args: [],
-    });
+    showNotice(
+      "Consensus accepted! Retrieving your on-chain assessment..."
+    );
+    analyzeButton.textContent = "Retrieving assessment...";
+
+    // The analyze method returns the specific report ID.
+    const reportId = transaction.decoded?.data;
+
+    if (reportId === undefined || reportId === null) {
+      throw new Error(
+        `Transaction succeeded (${txHash}), but the report ID was not returned in the transaction data. Check the transaction in GenLayer Explorer before retrying.`
+      );
+    }
 
     const report = await client.readContract({
       address: CONTRACT_ADDRESS,
@@ -105,11 +135,25 @@ analyzeButton.addEventListener("click", async () => {
       args: [reportId],
     });
 
+    if (!report) {
+      throw new Error(
+        `Transaction succeeded, but report #${reportId} could not be retrieved.`
+      );
+    }
+
     showAssessment(String(report));
-    showNotice(`Analysis finalized on Studionet. On-chain report #${reportId.toString()}.`);
+
+    showNotice(
+      `Analysis accepted on Studionet. On-chain report #${reportId.toString()}.`
+    );
   } catch (error) {
     console.error("ScamShield analysis error:", error);
-    showNotice(error?.shortMessage || error?.message || "Something went wrong. Please try again.");
+
+    showNotice(
+      error?.shortMessage ||
+        error?.message ||
+        "Something went wrong. Check the transaction in GenLayer Explorer before trying again."
+    );
   } finally {
     analyzeButton.disabled = false;
     analyzeButton.textContent = "Analyze for scams →";

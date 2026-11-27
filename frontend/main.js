@@ -20,23 +20,35 @@ function showNotice(message) {
 }
 
 function showAssessment(report) {
-  const parts = String(report).split(/\r?\n---\r?\n/);
+  const fullReport = String(report);
+  const parts = fullReport.split(/\r?\n---\r?\n/);
+
   const assessment =
-    parts.length > 1 ? parts.slice(1).join("\n---\n") : String(report);
+    parts.length > 1
+      ? parts.slice(1).join("\n---\n")
+      : fullReport;
 
   result.textContent = assessment.trim();
   result.hidden = false;
 }
 
-analyzeButton.addEventListener("click", async () => {
-  const text = subject.value.trim();
+function getErrorMessage(error) {
+  return (
+    error?.shortMessage ||
+    error?.message ||
+    "An unexpected error occurred. Check the transaction in GenLayer Explorer."
+  );
+}
 
-  if (!text) {
+analyzeButton.addEventListener("click", async () => {
+  const submittedText = subject.value.trim();
+
+  if (!submittedText) {
     showNotice("Please enter a suspicious link or message first.");
     return;
   }
 
-  if (text.length > 1200) {
+  if (submittedText.length > 1200) {
     showNotice("Please keep your submission under 1,200 characters.");
     return;
   }
@@ -51,6 +63,8 @@ analyzeButton.addEventListener("click", async () => {
   analyzeButton.disabled = true;
   analyzeButton.textContent = "Connecting to Studionet...";
   result.hidden = true;
+
+  let transactionHash;
 
   try {
     const accounts = await window.ethereum.request({
@@ -72,19 +86,21 @@ analyzeButton.addEventListener("click", async () => {
     await client.connect("studionet");
 
     showNotice(
-      "Preparing your on-chain AI analysis. Confirm the transaction in MetaMask when prompted."
+      "Preparing your AI scam analysis. Confirm the transaction in MetaMask."
     );
+
     analyzeButton.textContent = "Preparing transaction...";
 
     const write = {
       address: CONTRACT_ADDRESS,
       functionName: "analyze",
-      args: [text],
+      args: [submittedText],
     };
 
-    const estimate = await client.estimateTransactionFeesForWrite(write);
+    const estimate =
+      await client.estimateTransactionFeesForWrite(write);
 
-    const txHash = await client.writeContract({
+    transactionHash = await client.writeContract({
       ...write,
       fees: {
         distribution: estimate.distribution,
@@ -93,39 +109,44 @@ analyzeButton.addEventListener("click", async () => {
     });
 
     showNotice(
-      `Transaction submitted: ${txHash}. Waiting for GenLayer consensus...`
+      `Transaction submitted: ${transactionHash}. Waiting for GenLayer finalization. Do not submit it again.`
     );
-    analyzeButton.textContent = "Waiting for consensus...";
 
-    // Wait for the consensus decision instead of waiting indefinitely
-    // for full finalization.
-    const transaction = await client.waitForDecision({
-      hash: txHash,
+    analyzeButton.textContent = "Waiting for finalization...";
+
+    const transaction = await client.waitForFinalization({
+      hash: transactionHash,
       interval: 5000,
       retries: 100,
     });
 
     if (!isSuccessful(transaction)) {
       throw new Error(
-        `GenLayer analysis did not succeed: ${
-          transaction.statusName ?? "unknown status"
-        } / ${
-          transaction.txExecutionResultName ?? "unknown result"
-        }`
+        `The transaction did not complete successfully. Status: ${
+          transaction.statusName ?? "unknown"
+        }. Execution: ${
+          transaction.txExecutionResultName ?? "unknown"
+        }. Check the transaction in GenLayer Explorer before trying again.`
       );
     }
 
     showNotice(
-      "Consensus accepted! Retrieving your on-chain assessment..."
+      "Transaction finalized successfully. Retrieving your on-chain assessment..."
     );
+
     analyzeButton.textContent = "Retrieving assessment...";
 
-    // The analyze method returns the specific report ID.
-    const reportId = transaction.decoded?.data;
+    const reportCount = await client.readContract({
+      address: CONTRACT_ADDRESS,
+      functionName: "get_report_count",
+      args: [],
+    });
 
-    if (reportId === undefined || reportId === null) {
+    const reportId = Number(reportCount);
+
+    if (!Number.isSafeInteger(reportId) || reportId < 1) {
       throw new Error(
-        `Transaction succeeded (${txHash}), but the report ID was not returned in the transaction data. Check the transaction in GenLayer Explorer before retrying.`
+        `The transaction finalized, but the report count could not be read. Transaction: ${transactionHash}`
       );
     }
 
@@ -135,25 +156,31 @@ analyzeButton.addEventListener("click", async () => {
       args: [reportId],
     });
 
-    if (!report) {
+    if (
+      report === null ||
+      report === undefined ||
+      String(report).trim() === ""
+    ) {
       throw new Error(
-        `Transaction succeeded, but report #${reportId} could not be retrieved.`
+        `The transaction finalized, but report #${reportId} could not be retrieved. Transaction: ${transactionHash}`
       );
     }
 
-    showAssessment(String(report));
+    showAssessment(report);
 
     showNotice(
-      `Analysis accepted on Studionet. On-chain report #${reportId.toString()}.`
+      `Analysis finalized on Studionet. On-chain report #${reportId}.`
     );
   } catch (error) {
     console.error("ScamShield analysis error:", error);
 
-    showNotice(
-      error?.shortMessage ||
-        error?.message ||
-        "Something went wrong. Check the transaction in GenLayer Explorer before trying again."
-    );
+    if (transactionHash) {
+      showNotice(
+        `A transaction was submitted: ${transactionHash}. If confirmation timed out, check this transaction in GenLayer Explorer before trying again. Do not submit the same analysis again until its status is checked. Details: ${getErrorMessage(error)}`
+      );
+    } else {
+      showNotice(getErrorMessage(error));
+    }
   } finally {
     analyzeButton.disabled = false;
     analyzeButton.textContent = "Analyze for scams →";
